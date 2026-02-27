@@ -94,6 +94,7 @@ class ResNet(nn.Module):
     and a final fully connected layer for classification.
 
     Args:
+    -----
         block (nn.Module):
             Residual block class to use (BasicBlock or Bottleneck).
         num_blocks (list of int):
@@ -105,6 +106,7 @@ class ResNet(nn.Module):
             Number of output classes for classification. Default: 10.
 
     Attributes:
+    -----------
         in_channels (int):
             Number of input channels for the next block; updated after each layer.
         conv1 (nn.Conv2d):
@@ -128,6 +130,12 @@ class ResNet(nn.Module):
         >>> model = ResNet(BasicBlock, [2, 2, 2, 2], num_classes=10)
         >>> x = torch.randn(8, 3, 32, 32)
         >>> logits = model(x)
+
+    References:
+    ----------
+    [1] He, K., Zhang, X., Ren, S., & Sun, J. (2016). Deep residual learning for image recognition. In Proceedings of the IEEE conference on computer vision and pattern recognition (pp. 770-778).
+    [2] https://github.com/KaimingHe/deep-residual-networks
+    
     """
     def __init__(self, block, num_blocks, norm=nn.BatchNorm2d, num_classes=10):
         super(ResNet, self).__init__()
