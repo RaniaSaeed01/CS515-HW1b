@@ -5,6 +5,9 @@ import torch
 
 from parameters import get_params
 from models.MLP import MLP
+from models.CNN import MNIST_CNN, SimpleCNN
+from models.VGG import VGG
+from models.ResNet import ResNet, BasicBlock
 from train import run_training
 from test  import run_test
 
@@ -23,12 +26,36 @@ def set_seed(seed):
 
 
 def build_model(params):
-    return MLP(
-        input_size   = params["input_size"],
-        hidden_sizes = params["hidden_sizes"],
-        num_classes  = params["num_classes"],
-        dropout      = params["dropout"],
-    )
+    model_name = params["model"]
+    dataset    = params["dataset"]
+    nc         = params["num_classes"]
+
+    if model_name == "mlp":
+        return MLP(
+            input_size   = params["input_size"],
+            hidden_sizes = params["hidden_sizes"],
+            num_classes  = nc,
+            dropout      = params["dropout"],
+        )
+
+    if model_name == "cnn":
+        # MNIST_CNN expects 1-channel 28×28; SimpleCNN expects 3-channel 32×32
+        if dataset == "mnist":
+            return MNIST_CNN(num_classes=nc)
+        else:
+            return SimpleCNN(num_classes=nc)
+
+    if model_name == "vgg":
+        if dataset == "mnist":
+            raise ValueError("VGG is designed for 3-channel images; use cifar10 with vgg.")
+        return VGG(dept=params["vgg_depth"], num_class=nc)
+
+    if model_name == "resnet":
+        if dataset == "mnist":
+            raise ValueError("ResNet is designed for 3-channel images; use cifar10 with resnet.")
+        return ResNet(BasicBlock, params["resnet_layers"], num_classes=nc)
+
+    raise ValueError(f"Unknown model: {model_name}")
 
 
 def main():
@@ -36,6 +63,7 @@ def main():
 
     set_seed(params["seed"])
     print(f"Seed set to: {params['seed']}")
+    print(f"Dataset: {params['dataset']}  |  Model: {params['model']}")
 
     device = torch.device(
         params["device"] if torch.cuda.is_available() else

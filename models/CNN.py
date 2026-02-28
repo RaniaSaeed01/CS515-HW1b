@@ -5,7 +5,7 @@ import torch.nn.functional as F
 class MNIST_CNN(nn.Module):
 
     def __init__(self,norm,num_classes=10):
-        super(MNIST_NET, self).__init__()
+        super(MNIST_CNN, self).__init__()  # Fix: was MNIST_NET
         self.conv1 = nn.Conv2d(1, 20, 5, 1)
         self.conv2 = nn.Conv2d(20, 50, 5, 1)
         self.fc1 = nn.Linear(4 * 4 * 50, 500)

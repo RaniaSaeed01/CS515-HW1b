@@ -11,7 +11,7 @@ class LambdaLayer(nn.Module):
         return self.lambd(x)
 
 class BasicBlock(nn.Module):
-  """
+    """
     Basic residual block used in shallow ResNet architectures (e.g., ResNet-18, ResNet-34).
 
     This block consists of two 3×3 convolutional layers with Batch Normalization
@@ -55,8 +55,9 @@ class BasicBlock(nn.Module):
         where:
             H_out = H / stride
             W_out = W / stride
-"""
+    """
   
+    expansion = 1 # For BasicBlock, output channels = channels * expansion = channels
     def __init__(self, in_channels, channels, stride=1,norm=nn.BatchNorm2d, option='B'):
         super(BasicBlock, self).__init__()
         self.conv1 = nn.Conv2d(in_channels, channels, kernel_size=3, stride=stride, padding=1, bias=False)

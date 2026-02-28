@@ -5,13 +5,39 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 
+def get_transforms(params, train=True):
+    mean, std = params["mean"], params["std"]
+
+    if params["dataset"] == "mnist":
+        return transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+    else:  # cifar10
+        if train:
+            return transforms.Compose([
+                transforms.RandomCrop(32, padding=4),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                transforms.Normalize(mean, std),
+            ])
+        else:
+            return transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(mean, std),
+            ])
+
+
 def get_loaders(params):
-    tf = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,)),
-    ])
-    train_ds = datasets.MNIST(params["data_dir"], train=True,  download=True, transform=tf)
-    val_ds   = datasets.MNIST(params["data_dir"], train=False, download=True, transform=tf)
+    train_tf = get_transforms(params, train=True)
+    val_tf   = get_transforms(params, train=False)
+
+    if params["dataset"] == "mnist":
+        train_ds = datasets.MNIST(params["data_dir"], train=True,  download=True, transform=train_tf)
+        val_ds   = datasets.MNIST(params["data_dir"], train=False, download=True, transform=val_tf)
+    else:  # cifar10
+        train_ds = datasets.CIFAR10(params["data_dir"], train=True,  download=True, transform=train_tf)
+        val_ds   = datasets.CIFAR10(params["data_dir"], train=False, download=True, transform=val_tf)
 
     train_loader = DataLoader(train_ds, batch_size=params["batch_size"],
                               shuffle=True,  num_workers=params["num_workers"])
@@ -80,10 +106,9 @@ def run_training(model, params, device):
 
         if val_acc > best_acc:
             best_acc     = val_acc
-            best_weights = copy.deepcopy(model.state_dict())  # snapshot in memory
-            torch.save(best_weights, params["save_path"])      # persist to disk
-            print(f" Saved best model (val_acc={best_acc:.4f})")
+            best_weights = copy.deepcopy(model.state_dict())
+            torch.save(best_weights, params["save_path"])
+            print(f"  Saved best model (val_acc={best_acc:.4f})")
 
-    # Restore best weights into the model before returning
     model.load_state_dict(best_weights)
     print(f"\nTraining done. Best val accuracy: {best_acc:.4f}")
