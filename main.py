@@ -55,6 +55,7 @@ def main() -> None:
 
     Parses parameters, sets seed, selects device, builds the model,
     then runs training and/or testing depending on params.mode.
+    Run name is auto-generated from key hyperparameters for tracking.
     """
     params = get_params()
 
@@ -68,14 +69,27 @@ def main() -> None:
     )
     print(f"Device: {device}")
 
+    # Auto-generate a descriptive run name from key hyperparameters
+    hidden_str = "-".join(str(h) for h in params.hidden_sizes)
+    run_name = (
+        f"hidden={hidden_str}"
+        f"_act={params.activation}"
+        f"_drop={params.dropout}"
+        f"_bn={params.use_bn}"
+        f"_wd={params.weight_decay}"
+        f"_l1={params.l1_lambda}"
+        f"_sched={params.scheduler}"
+    )
+    print(f"Run: {run_name}")
+
     model = build_model(params).to(device)
     print(model)
 
     if params.mode in ("train", "both"):
-        run_training(model, params, device)
+        run_training(model, params, device, run_name=run_name)
 
     if params.mode in ("test", "both"):
-        run_test(model, params, device)
+        run_test(model, params, device, run_name=run_name)
 
 
 if __name__ == "__main__":

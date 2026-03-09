@@ -81,7 +81,8 @@ def get_params() -> Params:
                         metavar="H", help="Hidden layer widths e.g. --hidden_sizes 512 256 128")
     parser.add_argument("--dropout",    type=float, default=0.3)
     parser.add_argument("--activation", choices=["relu", "gelu"], default="relu")
-    parser.add_argument("--use_bn",     type=bool,  default=True)
+    parser.add_argument("--use_bn", action="store_true", default=True)
+    parser.add_argument("--no_bn",  action="store_true", default=False)
 
     # Training
     parser.add_argument("--epochs",      type=int,   default=10)
@@ -102,7 +103,7 @@ def get_params() -> Params:
         hidden_sizes=args.hidden_sizes,
         dropout=args.dropout,
         activation=args.activation,
-        use_bn=args.use_bn,
+        use_bn=not args.no_bn,
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr,

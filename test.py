@@ -1,5 +1,8 @@
 import torch
 import torch.nn as nn
+import os
+import csv
+
 from torch.utils.data import DataLoader
 from torchvision import datasets
 
@@ -12,6 +15,7 @@ def run_test(
     model:  torch.nn.Module,
     params: Params,
     device: torch.device,
+    run_name: str = "run",
 ) -> None:
     """
     Evaluate a trained MLP model on the MNIST test set.
@@ -49,8 +53,20 @@ def run_test(
             class_correct[t] += (p == t).item()
             class_total[t]   += 1
 
-    print(f"\n=== Test Results ===")
+    os.makedirs("results", exist_ok=True)
+
+    print(f"\n=== Test Results: {run_name} ===")
     print(f"Overall accuracy: {correct/n:.4f}  ({correct}/{n})\n")
     for i in range(params.num_classes):
         acc = class_correct[i] / class_total[i]
         print(f"  Class {i}: {acc:.4f}  ({class_correct[i]}/{class_total[i]})")
+
+    csv_path = f"results/{run_name}_test.csv"
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["class", "correct", "total", "accuracy"])
+        for i in range(params.num_classes):
+            acc = class_correct[i] / class_total[i]
+            writer.writerow([i, class_correct[i], class_total[i], f"{acc:.4f}"])
+        writer.writerow(["overall", correct, n, f"{correct/n:.4f}"])
+    print(f"Saved test CSV: {csv_path}")
