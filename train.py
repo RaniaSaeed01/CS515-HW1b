@@ -155,18 +155,25 @@ def run_training(
     model:  nn.Module,
     params: Params,
     device: torch.device,
+    run_name: str = "run",
 ) -> None:
     """
     Execute the full training loop with validation, checkpointing,
-    and early stopping.
+    early stopping, CSV logging, and loss/accuracy plotting.
 
     Args:
         model: The MLP model to train.
         params: Configuration dataclass with all training hyperparameters.
         device: Device to run computations on.
+        run_name: Label used for naming saved CSV and plot files.
     """
-    train_loader, val_loader = get_loaders(params)
+    import os
+    import csv
+    import matplotlib.pyplot as plt
 
+    os.makedirs("results", exist_ok=True)
+
+    train_loader, val_loader = get_loaders(params)
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -178,6 +185,15 @@ def run_training(
     best_acc         = 0.0
     best_weights     = None
     patience_counter = 0
+
+    # Tracking
+    history = {
+        "epoch":     [],
+        "train_loss": [],
+        "train_acc":  [],
+        "val_loss":   [],
+        "val_acc":    [],
+    }
 
     for epoch in range(1, params.epochs + 1):
         print(f"\nEpoch {epoch}/{params.epochs}")
@@ -191,6 +207,13 @@ def run_training(
 
         print(f"  Train loss: {tr_loss:.4f}  acc: {tr_acc:.4f}")
         print(f"  Val   loss: {val_loss:.4f}  acc: {val_acc:.4f}")
+
+        # Record history
+        history["epoch"].append(epoch)
+        history["train_loss"].append(tr_loss)
+        history["train_acc"].append(tr_acc)
+        history["val_loss"].append(val_loss)
+        history["val_acc"].append(val_acc)
 
         if val_acc > best_acc:
             best_acc         = val_acc
@@ -207,3 +230,36 @@ def run_training(
 
     model.load_state_dict(best_weights)
     print(f"\nTraining done. Best val accuracy: {best_acc:.4f}")
+
+    # --- Save CSV ---
+    csv_path = f"results/{run_name}.csv"
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=history.keys())
+        writer.writeheader()
+        for i in range(len(history["epoch"])):
+            writer.writerow({k: history[k][i] for k in history})
+    print(f"Saved CSV: {csv_path}")
+
+    # --- Save plots ---
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+    fig.suptitle(run_name)
+
+    ax1.plot(history["epoch"], history["train_loss"], label="Train Loss")
+    ax1.plot(history["epoch"], history["val_loss"],   label="Val Loss")
+    ax1.set_xlabel("Epoch")
+    ax1.set_ylabel("Loss")
+    ax1.set_title("Loss")
+    ax1.legend()
+
+    ax2.plot(history["epoch"], history["train_acc"], label="Train Acc")
+    ax2.plot(history["epoch"], history["val_acc"],   label="Val Acc")
+    ax2.set_xlabel("Epoch")
+    ax2.set_ylabel("Accuracy")
+    ax2.set_title("Accuracy")
+    ax2.legend()
+
+    plot_path = f"results/{run_name}.png"
+    plt.tight_layout()
+    plt.savefig(plot_path)
+    plt.close()
+    print(f"Saved plot: {plot_path}")
