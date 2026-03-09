@@ -1,28 +1,44 @@
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
+from torchvision import datasets
 
+from parameters import Params
 from train import get_transforms
 
 
 @torch.no_grad()
-def run_test(model, params, device):
-    tf = get_transforms(params, train=False)
+def run_test(
+    model:  torch.nn.Module,
+    params: Params,
+    device: torch.device,
+) -> None:
+    """
+    Evaluate a trained MLP model on the MNIST test set.
 
-    if params["dataset"] == "mnist":
-        test_ds = datasets.MNIST(params["data_dir"], train=False, download=True, transform=tf)
-    else:  # cifar10
-        test_ds = datasets.CIFAR10(params["data_dir"], train=False, download=True, transform=tf)
+    Loads saved weights from params.save_path, runs inference over
+    the full test set, and prints overall accuracy and per-class accuracy.
 
-    loader = DataLoader(test_ds, batch_size=params["batch_size"],
-                        shuffle=False, num_workers=params["num_workers"])
+    Args:
+        model: The MLP model to evaluate.
+        params: Configuration dataclass containing dataset and path settings.
+        device: Device to run inference on.
 
-    model.load_state_dict(torch.load(params["save_path"], map_location=device))
+    Example:
+        >>> run_test(model, params, device)
+    """
+    tf = get_transforms(params)
+
+    test_ds = datasets.MNIST(params.data_dir, train=False, download=True, transform=tf)
+    loader  = DataLoader(test_ds, batch_size=params.batch_size,
+                         shuffle=False, num_workers=params.num_workers)
+
+    model.load_state_dict(torch.load(params.save_path, map_location=device))
     model.eval()
 
-    correct, n = 0, 0
-    class_correct = [0] * params["num_classes"]
-    class_total   = [0] * params["num_classes"]
+    correct, n          = 0, 0
+    class_correct       = [0] * params.num_classes
+    class_total         = [0] * params.num_classes
 
     for imgs, labels in loader:
         imgs, labels = imgs.to(device), labels.to(device)
@@ -35,6 +51,6 @@ def run_test(model, params, device):
 
     print(f"\n=== Test Results ===")
     print(f"Overall accuracy: {correct/n:.4f}  ({correct}/{n})\n")
-    for i in range(params["num_classes"]):
+    for i in range(params.num_classes):
         acc = class_correct[i] / class_total[i]
         print(f"  Class {i}: {acc:.4f}  ({class_correct[i]}/{class_total[i]})")
