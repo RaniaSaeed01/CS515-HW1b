@@ -1,50 +1,152 @@
 import copy
-from typing import Tuple
+from typing import Tuple, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 from parameters import Params
 
 
-def get_transforms(params: Params) -> transforms.Compose:
+def get_transforms(params: Params, train: bool = True) -> transforms.Compose:
     """
-    Build the MNIST normalization transform pipeline.
+    Build a torchvision transform pipeline for the given dataset and split.
+
+    For CIFAR-10 training, applies random cropping and horizontal flipping.
+    When using pretrained models in finetune mode, resizes images to 224x224
+    to match ImageNet input dimensions.
 
     Args:
-        params: Configuration dataclass containing mean and std.
+        params: Configuration dataclass containing dataset, mean, std,
+                pretrained, and transfer_mode settings.
+        train: If True, apply training augmentations.
 
     Returns:
         A composed torchvision transform pipeline.
     """
-    return transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(params.mean, params.std),
-    ])
+    mean, std = params.mean, params.std
+    resize = (params.pretrained and params.transfer_mode == "finetune"
+              and params.dataset == "cifar10")
+
+    if params.dataset == "mnist":
+        return transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std),
+        ])
+    else:  # cifar10
+        if train:
+            t = [transforms.RandomCrop(32, padding=4),
+                 transforms.RandomHorizontalFlip()]
+            if resize:
+                t.append(transforms.Resize(224))
+            t += [transforms.ToTensor(), transforms.Normalize(mean, std)]
+            return transforms.Compose(t)
+        else:
+            t = []
+            if resize:
+                t.append(transforms.Resize(224))
+            t += [transforms.ToTensor(), transforms.Normalize(mean, std)]
+            return transforms.Compose(t)
 
 
 def get_loaders(params: Params) -> Tuple[DataLoader, DataLoader]:
     """
-    Build and return MNIST training and validation DataLoaders.
+    Build and return training and validation DataLoaders.
 
     Args:
-        params: Configuration dataclass containing data settings.
+        params: Configuration dataclass containing dataset and data settings.
 
     Returns:
         A tuple of (train_loader, val_loader).
     """
-    tf = get_transforms(params)
+    train_tf = get_transforms(params, train=True)
+    val_tf   = get_transforms(params, train=False)
 
-    train_ds = datasets.MNIST(params.data_dir, train=True,  download=True, transform=tf)
-    val_ds   = datasets.MNIST(params.data_dir, train=False, download=True, transform=tf)
+    if params.dataset == "mnist":
+        train_ds = datasets.MNIST(params.data_dir, train=True,  download=True, transform=train_tf)
+        val_ds   = datasets.MNIST(params.data_dir, train=False, download=True, transform=val_tf)
+    else:  # cifar10
+        train_ds = datasets.CIFAR10(params.data_dir, train=True,  download=True, transform=train_tf)
+        val_ds   = datasets.CIFAR10(params.data_dir, train=False, download=True, transform=val_tf)
 
     train_loader = DataLoader(train_ds, batch_size=params.batch_size,
                               shuffle=True,  num_workers=params.num_workers)
     val_loader   = DataLoader(val_ds,   batch_size=params.batch_size,
                               shuffle=False, num_workers=params.num_workers)
     return train_loader, val_loader
+
+
+def get_criterion(params: Params) -> nn.Module:
+    """
+    Return the loss function based on params.
+
+    Uses CrossEntropyLoss with optional label smoothing. Label smoothing
+    prevents overconfidence by distributing a small probability mass
+    uniformly across non-target classes.
+
+    Args:
+        params: Configuration dataclass containing label_smoothing.
+
+    Returns:
+        A loss function module.
+    """
+    return nn.CrossEntropyLoss(label_smoothing=params.label_smoothing)
+
+
+def distillation_loss(
+    student_logits:   torch.Tensor,
+    teacher_logits:   torch.Tensor,
+    labels:           torch.Tensor,
+    temperature:      float,
+    alpha:            float,
+    criterion:        nn.Module,
+    soft_target_mode: str = "full",
+) -> torch.Tensor:
+    """
+    Compute the knowledge distillation loss.
+
+    Combines a soft target loss (student learns from teacher probability
+    distribution) with a hard target loss (student learns from ground truth).
+
+    For soft_target_mode='full': standard KD using the full teacher softmax
+    distribution as soft targets.
+
+    For soft_target_mode='true_only': assign teacher's confidence for the
+    true class to that class only; distribute remaining probability equally
+    across all other classes. This encodes per-example difficulty from
+    the teacher without transferring inter-class relationships.
+
+    Args:
+        student_logits: Raw logits from the student model (B, C).
+        teacher_logits: Raw logits from the teacher model (B, C).
+        labels: Ground truth class indices (B,).
+        temperature: Softens probability distributions. Higher = softer.
+        alpha: Weight for the soft distillation loss (1-alpha for hard loss).
+        criterion: Hard target loss function (e.g. CrossEntropyLoss).
+        soft_target_mode: 'full' or 'true_only'.
+
+    Returns:
+        Combined scalar loss value.
+    """
+    teacher_probs = F.softmax(teacher_logits / temperature, dim=1)
+
+    if soft_target_mode == "true_only":
+        batch_size, num_classes = teacher_probs.size()
+        true_probs   = teacher_probs[range(batch_size), labels].unsqueeze(1)
+        remaining    = (1.0 - true_probs) / (num_classes - 1)
+        soft_targets = remaining.expand_as(teacher_probs).clone()
+        soft_targets[range(batch_size), labels] = true_probs.squeeze(1)
+    else:
+        soft_targets = teacher_probs
+
+    student_log_probs = F.log_softmax(student_logits / temperature, dim=1)
+    soft_loss = F.kl_div(student_log_probs, soft_targets,
+                         reduction="batchmean") * (temperature ** 2)
+    hard_loss = criterion(student_logits, labels)
+
+    return alpha * soft_loss + (1.0 - alpha) * hard_loss
 
 
 def train_one_epoch(
@@ -54,30 +156,48 @@ def train_one_epoch(
     criterion: nn.Module,
     device:    torch.device,
     params:    Params,
+    teacher:   Optional[nn.Module] = None,
 ) -> Tuple[float, float]:
     """
     Train the model for a single epoch.
 
+    If params.distillation is True and a teacher is provided, uses
+    distillation_loss instead of the standard criterion.
+
     Args:
-        model: The MLP model to train.
+        model: The student model to train.
         loader: DataLoader providing training batches.
-        optimizer: Optimizer instance for weight updates.
-        criterion: Loss function.
-        device: Device to run computations on.
-        params: Configuration dataclass containing l1_lambda and log_interval.
+        optimizer: Optimizer for weight updates.
+        criterion: Hard target loss function.
+        device: Device to run on.
+        params: Configuration dataclass.
+        teacher: Optional frozen teacher model for distillation.
 
     Returns:
-        A tuple of (average_loss, accuracy) over the full epoch.
+        A tuple of (average_loss, accuracy) for the epoch.
     """
     model.train()
+    if teacher is not None:
+        teacher.eval()
+
     total_loss, correct, n = 0.0, 0, 0
 
     for batch_idx, (imgs, labels) in enumerate(loader):
         imgs, labels = imgs.to(device), labels.to(device)
 
         optimizer.zero_grad()
-        out  = model(imgs)
-        loss = criterion(out, labels)
+        out = model(imgs)
+
+        if params.distillation and teacher is not None:
+            with torch.no_grad():
+                teacher_out = teacher(imgs)
+            loss = distillation_loss(
+                out, teacher_out, labels,
+                params.temperature, params.alpha,
+                criterion, params.soft_target_mode,
+            )
+        else:
+            loss = criterion(out, labels)
 
         if params.l1_lambda > 0.0:
             l1_penalty = sum(p.abs().sum() for p in model.parameters())
@@ -104,16 +224,16 @@ def validate(
     device:    torch.device,
 ) -> Tuple[float, float]:
     """
-    Evaluate the model on the validation set.
+    Evaluate the model on a validation DataLoader.
 
     Args:
-        model: The MLP model to evaluate.
+        model: The model to evaluate.
         loader: DataLoader providing validation batches.
         criterion: Loss function.
-        device: Device to run computations on.
+        device: Device to run on.
 
     Returns:
-        A tuple of (average_loss, accuracy) over the full loader.
+        A tuple of (average_loss, accuracy).
     """
     model.eval()
     total_loss, correct, n = 0.0, 0, 0
@@ -133,13 +253,13 @@ def validate(
 def build_scheduler(
     optimizer: torch.optim.Optimizer,
     params:    Params,
-) -> torch.optim.lr_scheduler.LRScheduler | None:
+) -> Optional[torch.optim.lr_scheduler.LRScheduler]:
     """
     Construct a learning rate scheduler based on params.scheduler.
 
     Args:
         optimizer: The optimizer whose LR will be scheduled.
-        params: Configuration dataclass containing scheduler type and epochs.
+        params: Configuration dataclass.
 
     Returns:
         An LRScheduler instance, or None if params.scheduler is 'none'.
@@ -152,20 +272,22 @@ def build_scheduler(
 
 
 def run_training(
-    model:  nn.Module,
-    params: Params,
-    device: torch.device,
+    model:    nn.Module,
+    params:   Params,
+    device:   torch.device,
     run_name: str = "run",
+    teacher:  Optional[nn.Module] = None,
 ) -> None:
     """
     Execute the full training loop with validation, checkpointing,
     early stopping, CSV logging, and loss/accuracy plotting.
 
     Args:
-        model: The MLP model to train.
+        model: The student (or standalone) model to train.
         params: Configuration dataclass with all training hyperparameters.
-        device: Device to run computations on.
+        device: Device to run on.
         run_name: Label used for naming saved CSV and plot files.
+        teacher: Optional frozen teacher model for knowledge distillation.
     """
     import os
     import csv
@@ -174,7 +296,7 @@ def run_training(
     os.makedirs("results", exist_ok=True)
 
     train_loader, val_loader = get_loaders(params)
-    criterion = nn.CrossEntropyLoss()
+    criterion = get_criterion(params)
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=params.learning_rate,
@@ -186,20 +308,16 @@ def run_training(
     best_weights     = None
     patience_counter = 0
 
-    # Tracking
     history = {
-        "epoch":     [],
-        "train_loss": [],
-        "train_acc":  [],
-        "val_loss":   [],
-        "val_acc":    [],
+        "epoch": [], "train_loss": [], "train_acc": [],
+        "val_loss": [], "val_acc": [],
     }
 
     for epoch in range(1, params.epochs + 1):
         print(f"\nEpoch {epoch}/{params.epochs}")
 
         tr_loss, tr_acc   = train_one_epoch(model, train_loader, optimizer,
-                                            criterion, device, params)
+                                            criterion, device, params, teacher)
         val_loss, val_acc = validate(model, val_loader, criterion, device)
 
         if scheduler is not None:
@@ -208,7 +326,6 @@ def run_training(
         print(f"  Train loss: {tr_loss:.4f}  acc: {tr_acc:.4f}")
         print(f"  Val   loss: {val_loss:.4f}  acc: {val_acc:.4f}")
 
-        # Record history
         history["epoch"].append(epoch)
         history["train_loss"].append(tr_loss)
         history["train_acc"].append(tr_acc)
@@ -231,7 +348,7 @@ def run_training(
     model.load_state_dict(best_weights)
     print(f"\nTraining done. Best val accuracy: {best_acc:.4f}")
 
-    # --- Save CSV ---
+    # Save CSV
     csv_path = f"results/{run_name}.csv"
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=history.keys())
@@ -240,24 +357,17 @@ def run_training(
             writer.writerow({k: history[k][i] for k in history})
     print(f"Saved CSV: {csv_path}")
 
-    # --- Save plots ---
+    # Save plots
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
     fig.suptitle(run_name)
-
     ax1.plot(history["epoch"], history["train_loss"], label="Train Loss")
     ax1.plot(history["epoch"], history["val_loss"],   label="Val Loss")
-    ax1.set_xlabel("Epoch")
-    ax1.set_ylabel("Loss")
-    ax1.set_title("Loss")
-    ax1.legend()
-
-    ax2.plot(history["epoch"], history["train_acc"], label="Train Acc")
-    ax2.plot(history["epoch"], history["val_acc"],   label="Val Acc")
-    ax2.set_xlabel("Epoch")
-    ax2.set_ylabel("Accuracy")
-    ax2.set_title("Accuracy")
-    ax2.legend()
-
+    ax1.set_xlabel("Epoch"); ax1.set_ylabel("Loss")
+    ax1.set_title("Loss");   ax1.legend()
+    ax2.plot(history["epoch"], history["train_acc"],  label="Train Acc")
+    ax2.plot(history["epoch"], history["val_acc"],    label="Val Acc")
+    ax2.set_xlabel("Epoch"); ax2.set_ylabel("Accuracy")
+    ax2.set_title("Accuracy"); ax2.legend()
     plot_path = f"results/{run_name}.png"
     plt.tight_layout()
     plt.savefig(plot_path)

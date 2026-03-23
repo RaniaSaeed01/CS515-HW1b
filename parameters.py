@@ -6,19 +6,33 @@ import argparse
 @dataclass
 class Params:
     """
-    Configuration dataclass for MLP classification on MNIST.
+    Configuration dataclass for HW1a (MLP/MNIST) and HW1b
+    (Transfer Learning and Knowledge Distillation on CIFAR-10).
 
     Attributes:
+        dataset: Dataset to use ('mnist' or 'cifar10').
         data_dir: Directory to download/load data from.
         num_workers: Number of parallel DataLoader workers.
-        mean: Normalization mean for MNIST.
-        std: Normalization std for MNIST.
-        input_size: Flattened input dimensionality (784 for MNIST).
-        hidden_sizes: List of hidden layer widths.
+        mean: Normalization mean per channel.
+        std: Normalization std per channel.
+        input_size: Flattened input dimensionality.
         num_classes: Number of output classes.
+        model: Model architecture to use.
+        hidden_sizes: MLP hidden layer widths.
         dropout: Dropout probability.
         activation: Activation function ('relu' or 'gelu').
-        use_bn: Whether to use BatchNorm1d layers.
+        use_bn: Whether to use BatchNorm1d in MLP.
+        vgg_depth: VGG variant depth string.
+        resnet_layers: Number of blocks per ResNet stage.
+        pretrained: Whether to use ImageNet pretrained weights.
+        freeze_backbone: Whether to freeze backbone and train head only.
+        transfer_mode: 'finetune' (resize images) or 'scratch' (modify conv).
+        label_smoothing: Label smoothing coefficient (0.0 = off).
+        distillation: Whether to use knowledge distillation.
+        teacher_path: Path to saved teacher model weights.
+        temperature: Distillation temperature for softening distributions.
+        alpha: Weight of soft loss in distillation (1-alpha for hard loss).
+        soft_target_mode: 'full' for standard KD, 'true_only' for HW1b part 3.
         epochs: Maximum number of training epochs.
         batch_size: Number of samples per batch.
         learning_rate: Initial learning rate.
@@ -33,23 +47,42 @@ class Params:
         mode: Pipeline mode ('train', 'test', or 'both').
     """
 
-    # Data (fixed for MNIST)
-    data_dir:    str              = "./data"
-    num_workers: int              = 2
-    mean:        Tuple[float, ...] = (0.1307,)
-    std:         Tuple[float, ...] = (0.3081,)
-    input_size:  int              = 784
-    num_classes: int              = 10
+    # Data
+    dataset:     str               = "cifar10"
+    data_dir:    str               = "./data"
+    num_workers: int               = 2
+    mean:        Tuple[float, ...] = (0.4914, 0.4822, 0.4465)
+    std:         Tuple[float, ...] = (0.2023, 0.1994, 0.2010)
+    input_size:  int               = 3072
+    num_classes: int               = 10
 
     # Model
-    hidden_sizes: List[int] = field(default_factory=lambda: [512, 256, 128])
-    dropout:      float     = 0.3
-    activation:   str       = "relu"
-    use_bn:       bool      = True
+    model:         str       = "resnet"
+    hidden_sizes:  List[int] = field(default_factory=lambda: [512, 256, 128])
+    dropout:       float     = 0.3
+    activation:    str       = "relu"
+    use_bn:        bool      = True
+    vgg_depth:     str       = "16"
+    resnet_layers: List[int] = field(default_factory=lambda: [2, 2, 2, 2])
+
+    # Transfer learning
+    pretrained:      bool = True
+    freeze_backbone: bool = True
+    transfer_mode:   str  = "finetune"
+
+    # Label smoothing
+    label_smoothing: float = 0.0
+
+    # Knowledge distillation
+    distillation:     bool  = False
+    teacher_path:     str   = "best_teacher.pth"
+    temperature:      float = 4.0
+    alpha:            float = 0.7
+    soft_target_mode: str   = "full"
 
     # Training
-    epochs:              int   = 10
-    batch_size:          int   = 64
+    epochs:              int   = 20
+    batch_size:          int   = 128
     learning_rate:       float = 1e-3
     weight_decay:        float = 1e-4
     l1_lambda:           float = 0.0
@@ -72,38 +105,76 @@ def get_params() -> Params:
         Params: A dataclass instance with all configuration values set.
 
     Example:
-        $ python main.py --epochs 20 --lr 1e-3 --hidden_sizes 512 256 128
+        $ python main.py --model resnet --dataset cifar10 --pretrained --epochs 20
     """
-    parser = argparse.ArgumentParser(description="MLP on MNIST")
+    parser = argparse.ArgumentParser(description="HW1b: Transfer Learning and Knowledge Distillation")
 
-    # Model
-    parser.add_argument("--hidden_sizes", type=int, nargs="+", default=[512, 256, 128],
-                        metavar="H", help="Hidden layer widths e.g. --hidden_sizes 512 256 128")
-    parser.add_argument("--dropout",    type=float, default=0.3)
-    parser.add_argument("--activation", choices=["relu", "gelu"], default="relu")
-    parser.add_argument("--use_bn", action="store_true", default=True)
-    parser.add_argument("--no_bn",  action="store_true", default=False)
+    # Data / model
+    parser.add_argument("--mode",    choices=["train", "test", "both"],                     default="both")
+    parser.add_argument("--dataset", choices=["mnist", "cifar10"],                          default="cifar10")
+    parser.add_argument("--model",   choices=["mlp", "cnn", "vgg", "resnet", "mobilenet"], default="resnet")
+    parser.add_argument("--vgg_depth",     choices=["11", "13", "16", "19"],                default="16")
+    parser.add_argument("--resnet_layers", type=int, nargs=4, default=[2, 2, 2, 2],
+                        metavar=("L1", "L2", "L3", "L4"))
+
+    # Transfer learning
+    parser.add_argument("--transfer_mode",   choices=["finetune", "scratch"], default="finetune")
+    parser.add_argument("--pretrained",      action="store_true", default=True)
+    parser.add_argument("--no_pretrained",   action="store_true", default=False)
+    parser.add_argument("--freeze_backbone", action="store_true", default=True)
+    parser.add_argument("--no_freeze",       action="store_true", default=False)
+
+    # Label smoothing
+    parser.add_argument("--label_smoothing", type=float, default=0.0)
+
+    # Knowledge distillation
+    parser.add_argument("--distillation",     action="store_true", default=False)
+    parser.add_argument("--teacher_path",     type=str,   default="best_teacher.pth")
+    parser.add_argument("--temperature",      type=float, default=4.0)
+    parser.add_argument("--alpha",            type=float, default=0.7)
+    parser.add_argument("--soft_target_mode", choices=["full", "true_only"], default="full")
 
     # Training
-    parser.add_argument("--epochs",      type=int,   default=10)
+    parser.add_argument("--epochs",      type=int,   default=20)
     parser.add_argument("--lr",          type=float, default=1e-3)
-    parser.add_argument("--batch_size",  type=int,   default=64)
-    parser.add_argument("--weight_decay",         type=float, default=1e-4)
-    parser.add_argument("--l1_lambda",            type=float, default=0.0)
-    parser.add_argument("--scheduler",  choices=["step", "cosine", "none"], default="step")
-    parser.add_argument("--early_stop_patience",  type=int,   default=5)
+    parser.add_argument("--batch_size",  type=int,   default=128)
+    parser.add_argument("--weight_decay",type=float, default=1e-4)
+    parser.add_argument("--l1_lambda",   type=float, default=0.0)
+    parser.add_argument("--scheduler",   choices=["step", "cosine", "none"], default="step")
+    parser.add_argument("--early_stop_patience", type=int, default=5)
 
     # Misc
-    parser.add_argument("--device", type=str,                          default="cpu")
-    parser.add_argument("--mode",   choices=["train", "test", "both"], default="both")
+    parser.add_argument("--device",    type=str, default="cpu")
+    parser.add_argument("--save_path", type=str, default="best_model.pth")
 
     args = parser.parse_args()
 
+    if args.dataset == "mnist":
+        input_size = 784
+        mean = (0.1307,)
+        std  = (0.3081,)
+    else:
+        input_size = 3072
+        mean = (0.4914, 0.4822, 0.4465)
+        std  = (0.2023, 0.1994, 0.2010)
+
     return Params(
-        hidden_sizes=args.hidden_sizes,
-        dropout=args.dropout,
-        activation=args.activation,
-        use_bn=not args.no_bn,
+        dataset=args.dataset,
+        mean=mean,
+        std=std,
+        input_size=input_size,
+        model=args.model,
+        vgg_depth=args.vgg_depth,
+        resnet_layers=args.resnet_layers,
+        transfer_mode=args.transfer_mode,
+        pretrained=not args.no_pretrained,
+        freeze_backbone=not args.no_freeze,
+        label_smoothing=args.label_smoothing,
+        distillation=args.distillation,
+        teacher_path=args.teacher_path,
+        temperature=args.temperature,
+        alpha=args.alpha,
+        soft_target_mode=args.soft_target_mode,
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr,
@@ -112,5 +183,6 @@ def get_params() -> Params:
         scheduler=args.scheduler,
         early_stop_patience=args.early_stop_patience,
         device=args.device,
+        save_path=args.save_path,
         mode=args.mode,
     )
